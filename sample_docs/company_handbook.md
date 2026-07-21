@@ -1,4 +1,4 @@
-# Acme Tools — Customer Handbook (sample document)
+# Acme Tools  -  Customer Handbook (sample document)
 
 ## Refund policy
 

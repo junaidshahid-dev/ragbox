@@ -9,6 +9,16 @@ documents ──▶ ingest ──▶ chunk ──▶ index ──▶ retrieve to
  (.pdf .md .txt)        (overlapping)  (TF-IDF │ embeddings)   (extractive │ LLM)
 ```
 
+## It works
+
+CLI — ask a folder of documents, get cited passages:
+
+![CLI demo](assets/demo_cli.png)
+
+API — the same engine over FastAPI (interactive docs at `/docs`):
+
+![API demo](assets/demo_api.png)
+
 ## Design decisions (the interesting part)
 
 - **Pluggable retrieval.** A TF-IDF baseline (scikit-learn, no heavy deps) is always available;

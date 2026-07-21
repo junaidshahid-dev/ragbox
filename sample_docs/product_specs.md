@@ -1,4 +1,4 @@
-# Acme Tools — Product Specifications (sample document)
+# Acme Tools  -  Product Specifications (sample document)
 
 ## ToolMaster 3000
 
