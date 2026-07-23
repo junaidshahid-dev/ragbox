@@ -42,9 +42,10 @@ pip install -r requirements.txt
 # CLI — ask the bundled sample document
 python -m ragbox.cli ask "What is the refund policy?"
 
-# API
+# API + demo web UI
 uvicorn ragbox.api:app --reload
-# then open http://127.0.0.1:8000/docs
+#   http://127.0.0.1:8000/       -> a working demo page (ask questions in the browser)
+#   http://127.0.0.1:8000/docs   -> interactive API documentation
 ```
 
 API endpoints: `POST /upload` (add a document) · `POST /ask` (`{"query": ..., "k": 4, "mode":

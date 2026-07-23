@@ -12,14 +12,22 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .answer import answer_extractive, answer_llm
 from .chunk import chunk_documents
+from .demo import DEMO_HTML
 from .index import build_index
 from .ingest import SUPPORTED, load_path
 
 app = FastAPI(title="ragbox", description="Document Q&A with citations (RAG)", version="1.0.0")
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def demo() -> str:
+    """A minimal working demo UI (calls /ask live). API docs live at /docs."""
+    return DEMO_HTML
 
 DOCS_DIR = Path(os.environ.get("RAGBOX_DOCS", "sample_docs"))
 _state: dict = {"index": None, "n_chunks": 0, "sources": []}
