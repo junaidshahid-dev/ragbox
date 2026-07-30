@@ -299,3 +299,21 @@ def test_app_ui_handles_signed_out_state(client):
     html = client.get("/").text
     assert 'id="gate"' in html and "/welcome" in html
     assert "r.status === 401" in html
+
+
+# ------------------------------------------------------------ deployment safety
+def test_health_endpoint_reports_persistence(client):
+    """Deploying without a persistent volume silently destroys customer data on redeploy,
+    so /health must surface it rather than quietly appearing fine."""
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["data_writable"] is True
+    assert "data_persistent" in body        # False when RAGBOX_HOME isn't set to a volume
+    assert isinstance(body["accounts"], int)
+
+
+def test_health_needs_no_auth(client):
+    """Platform probes are unauthenticated."""
+    assert client.get("/health").status_code == 200

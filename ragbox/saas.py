@@ -250,6 +250,10 @@ class Tenancy:
         with self._conn() as c:
             c.execute("DELETE FROM sessions WHERE token = ?", (token,))
 
+    def account_count(self) -> int:
+        with self._conn() as c:
+            return int(c.execute("SELECT COUNT(*) FROM accounts").fetchone()[0])
+
     def _load(self, account_id: int) -> Account:
         with self._conn() as c:
             r = c.execute("SELECT id, email, plan, sub_status, period_end FROM accounts "

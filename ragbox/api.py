@@ -30,8 +30,12 @@ from .store import IndexStore
 app = FastAPI(title="ragbox", description="Multi-tenant document Q&A with citations (RAG)",
               version="2.0.0")
 
-TENANCY = Tenancy(db_path=os.environ.get("RAGBOX_DB", "ragbox_saas.db"),
-                  data_root=os.environ.get("RAGBOX_DATA", "tenant_data"))
+# Data location. In production BOTH of these must point inside a PERSISTENT VOLUME: container
+# filesystems on Railway/Render/Fly are wiped on every redeploy, which would delete every
+# account and every customer document. RAGBOX_HOME sets both at once (e.g. /data).
+_HOME = Path(os.environ.get("RAGBOX_HOME", "."))
+TENANCY = Tenancy(db_path=os.environ.get("RAGBOX_DB", str(_HOME / "ragbox_saas.db")),
+                  data_root=os.environ.get("RAGBOX_DATA", str(_HOME / "tenant_data")))
 STORE = IndexStore()
 SESSION_COOKIE = "ragbox_session"
 
@@ -87,6 +91,25 @@ def welcome() -> str:
 def pricing() -> list[dict]:
     """Plan table for the landing page. Unauthenticated and safe."""
     return public_pricing()
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness probe for the hosting platform, and a persistence self-check.
+
+    `data_persistent` is False when the data directory is NOT on a mounted volume - the single
+    most dangerous production misconfiguration for this app, because a redeploy would silently
+    destroy every customer's documents. Watch this in your platform's logs after deploying.
+    """
+    root = Path(TENANCY.data_root)
+    return {
+        "status": "ok",
+        "data_root": str(root.resolve()),
+        "data_writable": os.access(root, os.W_OK) if root.exists() else False,
+        "data_persistent": os.environ.get("RAGBOX_HOME") not in (None, "", "."),
+        "accounts": TENANCY.account_count(),
+        "tenants_cached": STORE.tenants_cached(),
+    }
 
 
 @app.post("/signup")
