@@ -226,3 +226,21 @@ def test_index_survives_tenant_cache_eviction(client):
     api.STORE.evict(acct.id)
     r = client.post("/ask", json={"query": "refund window"}, cookies=a)
     assert r.status_code == 200 and "30 days" in r.json()["text"]
+
+
+# ------------------------------------------------------------ landing page honesty
+def test_landing_pricing_matches_enforced_limits(client):
+    """The page must never advertise a limit the code doesn't actually enforce."""
+    from ragbox.saas import PLANS
+    html = client.get("/welcome").text
+    for plan in PLANS.values():
+        assert plan.label in html
+        assert f"{plan.max_documents:,}" in html
+        assert f"{plan.max_questions_per_month:,}" in html
+        assert f"{plan.max_upload_mb} MB" in html
+
+
+def test_landing_page_leaks_nothing(client):
+    html = client.get("/welcome").text.lower()
+    for secret in ("password", "token", "provider_ref", "api_key"):
+        assert secret not in html

@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from .answer import answer_extractive, answer_llm
 from .demo import DEMO_HTML
 from .ingest import SUPPORTED
+from .landing import landing_html
 from .saas import (Account, FeatureLocked, LimitReached, SaaSError, Tenancy, public_pricing)
 from .store import IndexStore
 
@@ -73,6 +74,13 @@ class AskRequest(BaseModel):
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def demo() -> str:
     return DEMO_HTML
+
+
+@app.get("/welcome", response_class=HTMLResponse, include_in_schema=False)
+def welcome() -> str:
+    """Marketing landing page. Pricing is rendered from PLANS so it can never drift out of
+    sync with the limits the product actually enforces."""
+    return landing_html()
 
 
 @app.get("/pricing")
