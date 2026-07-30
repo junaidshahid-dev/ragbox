@@ -244,3 +244,29 @@ def test_landing_page_leaks_nothing(client):
     html = client.get("/welcome").text.lower()
     for secret in ("password", "token", "provider_ref", "api_key"):
         assert secret not in html
+
+
+# ------------------------------------------------------------ conversion UI
+def test_landing_has_working_signup_modal(client):
+    """The CTA must open an in-page modal wired to the real /signup endpoint."""
+    html = client.get("/welcome").text
+    assert 'id="overlay"' in html and 'id="mform"' in html
+    assert "fetch('/' + mode" in html          # posts to /signup or /login
+    assert 'aria-modal="true"' in html          # accessible dialog
+    assert "Escape" in html                     # closable by keyboard
+    # and the endpoint it posts to actually works
+    r = client.post("/signup", json={"email": "modal@x.com", "password": "password123"})
+    assert r.status_code == 200
+
+
+def test_landing_respects_reduced_motion(client):
+    """Animations must switch off for users who ask the OS to reduce motion."""
+    assert "prefers-reduced-motion" in client.get("/welcome").text
+
+
+def test_landing_has_no_intrusive_popup_triggers(client):
+    """No timed or exit-intent interstitials: they'd undercut an honesty-based product."""
+    html = client.get("/welcome").text
+    assert "setTimeout(open" not in html
+    assert "mouseleave" not in html
+    assert "beforeunload" not in html
