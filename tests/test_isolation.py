@@ -240,10 +240,20 @@ def test_landing_pricing_matches_enforced_limits(client):
         assert f"{plan.max_upload_mb} MB" in html
 
 
-def test_landing_page_leaks_nothing(client):
-    html = client.get("/welcome").text.lower()
-    for secret in ("password", "token", "provider_ref", "api_key"):
-        assert secret not in html
+def test_landing_page_leaks_no_secret_values(client):
+    """The page may mention 'password' (it has a password FIELD); it must never embed a real
+    secret VALUE - a hash, a session token, or a provider reference."""
+    import re
+    # create an account so there is a real hash and token in the database to leak
+    client.post("/signup", json={"email": "leak@x.com", "password": "password123"})
+    token = client.cookies.get("ragbox_session")
+    html = client.get("/welcome").text
+
+    assert token and token not in html                  # no session token in the markup
+    assert "password123" not in html                    # no credential value
+    assert not re.search(r"\b[0-9a-f]{32,}\$[0-9a-f]{32,}\b", html)   # no salt$hash blob
+    for db_field in ("password_hash", "provider_ref", "sub_status"):
+        assert db_field not in html                     # no internal schema exposed
 
 
 # ------------------------------------------------------------ conversion UI
