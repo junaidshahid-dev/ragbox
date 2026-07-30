@@ -280,3 +280,22 @@ def test_landing_has_no_intrusive_popup_triggers(client):
     assert "setTimeout(open" not in html
     assert "mouseleave" not in html
     assert "beforeunload" not in html
+
+
+# ------------------------------------------------------------ product UI
+def test_app_ui_is_a_real_dashboard_not_a_demo(client):
+    """The signed-in product page must show account, usage, documents and upload - the things
+    a paying customer needs, not just a search box."""
+    html = client.get("/").text
+    for hook in ('id="planPill"', 'id="dFill"', 'id="qFill"', 'id="drop"', 'id="docs"',
+                 'id="upsell"', 'id="signout"', 'id="gate"'):
+        assert hook in html, f"app UI missing {hook}"
+    assert "fetch('/me')" in html and "fetch('/status')" in html
+    assert "prefers-reduced-motion" in html
+
+
+def test_app_ui_handles_signed_out_state(client):
+    """No session -> the page must offer a way back in, not break."""
+    html = client.get("/").text
+    assert 'id="gate"' in html and "/welcome" in html
+    assert "r.status === 401" in html
