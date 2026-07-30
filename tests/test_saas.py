@@ -194,33 +194,32 @@ def test_usage_summary_shape(t):
     s = t.usage_summary(a)
     assert s["plan"] == "free" and s["email"] == "sum@x.com"
     assert s["documents"]["limit"] == PLANS["free"].max_documents
-    assert s["features"]["api_access"] is False
+    assert s["features"]["llm_answers"] is False
     assert s["subscription"]["is_paying"] is False
 
 
 # ----------------------------------------------------------- feature gating
 def test_free_plan_locks_paid_features(t):
     a = t.signup("f@x.com", "password123")
-    for feature in ("llm_answers", "api_access", "export_data", "remove_branding"):
+    for feature in ("llm_answers", "priority_support"):
         with pytest.raises(FeatureLocked):
             t.require_feature(a, feature)
 
 
-def test_starter_unlocks_llm_but_not_api(t):
+def test_starter_unlocks_llm_but_not_priority_support(t):
     a = t.signup("s2@x.com", "password123")
     t.set_plan(a.id, "starter")
     a = t._load(a.id)
     t.require_feature(a, "llm_answers")               # allowed
     with pytest.raises(FeatureLocked):
-        t.require_feature(a, "api_access")            # still gated -> reason to go Business
+        t.require_feature(a, "priority_support")      # still gated -> reason to go Business
 
 
 def test_business_unlocks_everything(t):
     a = t.signup("b3@x.com", "password123")
     t.set_plan(a.id, "business")
     a = t._load(a.id)
-    for feature in ("llm_answers", "api_access", "export_data", "remove_branding",
-                    "priority_support"):
+    for feature in ("llm_answers", "priority_support"):
         t.require_feature(a, feature)
 
 
@@ -268,13 +267,13 @@ def test_expired_paid_period_auto_downgrades(t):
     t.activate_subscription(a.id, "business", period_end=time.time() + 100)
     a = t._load(a.id)
     assert a.entitled_plan == "business"
-    t.require_feature(a, "api_access")
+    t.require_feature(a, "priority_support")
 
     t.activate_subscription(a.id, "business", period_end=time.time() - 1)   # period ran out
     a = t._load(a.id)
     assert a.entitled_plan == "free"                  # entitlement derived, not trusted
     with pytest.raises(FeatureLocked):
-        t.require_feature(a, "api_access")
+        t.require_feature(a, "priority_support")
 
 
 def test_past_due_keeps_access_during_grace_then_drops(t):
@@ -332,7 +331,7 @@ def test_public_pricing_is_safe_and_complete():
     rows = public_pricing()
     assert [r["id"] for r in rows] == ["free", "starter", "business"]
     assert rows[0]["price_usd"] == 0 and rows[1]["price_usd"] == 19 and rows[2]["price_usd"] == 49
-    assert rows[2]["questions"] == "unlimited"
+    assert rows[2]["questions"] == 5000        # finite on EVERY tier: protects gross margin
     blob = str(rows).lower()
     for leak in ("password", "hash", "token", "provider_ref"):
         assert leak not in blob

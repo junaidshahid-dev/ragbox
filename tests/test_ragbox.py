@@ -64,9 +64,18 @@ def test_ingest_rejects_unknown_type(tmp_path):
 
 
 def test_api_upload_and_ask(tmp_path, monkeypatch):
+    """End-to-end through the authenticated API: signup -> upload -> cited answer.
+
+    (Multi-tenant isolation and plan enforcement are covered in test_isolation.py.)
+    """
+    import importlib
+    monkeypatch.setenv("RAGBOX_DB", str(tmp_path / "api.db"))
+    monkeypatch.setenv("RAGBOX_DATA", str(tmp_path / "api_data"))
     import ragbox.api as api
-    monkeypatch.setattr(api, "DOCS_DIR", tmp_path)
+    importlib.reload(api)
     client = TestClient(api.app)
+
+    client.post("/signup", json={"email": "user@test.com", "password": "password123"})
 
     r = client.get("/status")
     assert r.status_code == 200 and r.json()["indexed_chunks"] == 0
@@ -74,11 +83,13 @@ def test_api_upload_and_ask(tmp_path, monkeypatch):
     r = client.post("/ask", json={"query": "refund policy"})
     assert r.status_code == 409                       # nothing indexed yet -> clear error
 
-    r = client.post("/upload", files={"file": ("handbook.md", DOCS[0].text.encode(), "text/markdown")})
-    assert r.status_code == 200 and r.json()["indexed_chunks"] > 0
+    r = client.post("/upload",
+                    files={"file": ("handbook.md", DOCS[0].text.encode(), "text/markdown")})
+    assert r.status_code == 200 and r.json()["chunks_added"] > 0
 
     r = client.post("/ask", json={"query": "how do I get a refund?", "k": 2})
     assert r.status_code == 200
     body = r.json()
     assert body["citations"] and body["citations"][0]["source"] == "handbook.md"
     assert "refund" in body["text"].lower()
+    assert body["usage"]["questions_used"] == 1

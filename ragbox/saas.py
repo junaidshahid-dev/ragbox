@@ -41,34 +41,34 @@ class Plan:
     price_usd: int                    # per MONTH - recurring, not one-off
     max_documents: int
     max_questions_per_month: int
-    max_members: int
     # ---- feature gates ----
     llm_answers: bool                 # AI-written answers vs raw cited passages
-    api_access: bool                  # programmatic access for their own apps
-    export_data: bool                 # download their index / answer history
-    remove_branding: bool             # white-label the chat widget
     priority_support: bool
     max_upload_mb: int                # per-file size ceiling
 
 
+# v1 ships ONLY what the engine can actually deliver today. Deliberately omitted until built:
+# team members, API keys, data export, white-labelling. Promising an unbuilt feature is how a
+# first customer becomes a refund.
+#
+# Question caps are FINITE on every tier, including the top one. Each AI answer costs real API
+# money (~$0.007), so an "unlimited" $49 plan is a standing invitation to lose money on a heavy
+# user. A hard ceiling keeps every tier gross-margin positive.
 PLANS = {
     "free": Plan(
         "free", "Free", 0,
-        max_documents=10, max_questions_per_month=50, max_members=1,
-        llm_answers=False,            # citations only - proves value, withholds the polish
-        api_access=False, export_data=False, remove_branding=False,
+        max_documents=10, max_questions_per_month=50,
+        llm_answers=False,            # cited passages only - proves value, withholds the polish
         priority_support=False, max_upload_mb=5),
     "starter": Plan(
         "starter", "Starter", 19,
-        max_documents=200, max_questions_per_month=1000, max_members=3,
+        max_documents=200, max_questions_per_month=1000,
         llm_answers=True,             # the main reason to upgrade
-        api_access=False, export_data=True, remove_branding=False,
         priority_support=False, max_upload_mb=25),
     "business": Plan(
         "business", "Business", 49,
-        max_documents=2000, max_questions_per_month=10 ** 9, max_members=10,
-        llm_answers=True, api_access=True, export_data=True, remove_branding=True,
-        priority_support=True, max_upload_mb=100),
+        max_documents=1000, max_questions_per_month=5000,
+        llm_answers=True, priority_support=True, max_upload_mb=50),
 }
 
 TRIAL_DAYS = 14                       # paid features, no card - converts far better than a demo
@@ -405,8 +405,7 @@ class Tenancy:
             "documents": {"used": self.document_count(account.id), "limit": lim.max_documents},
             "questions": {"used": self.questions_used(account.id),
                           "limit": lim.max_questions_per_month},
-            "features": {"llm_answers": lim.llm_answers, "api_access": lim.api_access,
-                         "export_data": lim.export_data, "remove_branding": lim.remove_branding,
+            "features": {"llm_answers": lim.llm_answers,
                          "priority_support": lim.priority_support,
                          "max_upload_mb": lim.max_upload_mb},
         }
@@ -416,11 +415,7 @@ def public_pricing() -> list[dict]:
     """Plan table for the landing page - no secrets, safe to serve unauthenticated."""
     return [{
         "id": p.name, "label": p.label, "price_usd": p.price_usd,
-        "documents": p.max_documents,
-        "questions": ("unlimited" if p.max_questions_per_month >= 10 ** 9
-                      else p.max_questions_per_month),
-        "members": p.max_members, "upload_mb": p.max_upload_mb,
-        "llm_answers": p.llm_answers, "api_access": p.api_access,
-        "export_data": p.export_data, "remove_branding": p.remove_branding,
+        "documents": p.max_documents, "questions": p.max_questions_per_month,
+        "upload_mb": p.max_upload_mb, "llm_answers": p.llm_answers,
         "priority_support": p.priority_support,
     } for p in PLANS.values()]
