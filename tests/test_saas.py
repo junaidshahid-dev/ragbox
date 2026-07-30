@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-from ragbox.saas import (PLANS, LimitReached, SaaSError, Tenancy, hash_password,
-                         verify_password)
+from ragbox.saas import (GRACE_DAYS, PLANS, TRIAL_DAYS, FeatureLocked, LimitReached, SaaSError,
+                         Tenancy, hash_password, public_pricing, verify_password)
 
 
 @pytest.fixture()
@@ -194,4 +194,145 @@ def test_usage_summary_shape(t):
     s = t.usage_summary(a)
     assert s["plan"] == "free" and s["email"] == "sum@x.com"
     assert s["documents"]["limit"] == PLANS["free"].max_documents
-    assert s["api_access"] is False
+    assert s["features"]["api_access"] is False
+    assert s["subscription"]["is_paying"] is False
+
+
+# ----------------------------------------------------------- feature gating
+def test_free_plan_locks_paid_features(t):
+    a = t.signup("f@x.com", "password123")
+    for feature in ("llm_answers", "api_access", "export_data", "remove_branding"):
+        with pytest.raises(FeatureLocked):
+            t.require_feature(a, feature)
+
+
+def test_starter_unlocks_llm_but_not_api(t):
+    a = t.signup("s2@x.com", "password123")
+    t.set_plan(a.id, "starter")
+    a = t._load(a.id)
+    t.require_feature(a, "llm_answers")               # allowed
+    with pytest.raises(FeatureLocked):
+        t.require_feature(a, "api_access")            # still gated -> reason to go Business
+
+
+def test_business_unlocks_everything(t):
+    a = t.signup("b3@x.com", "password123")
+    t.set_plan(a.id, "business")
+    a = t._load(a.id)
+    for feature in ("llm_answers", "api_access", "export_data", "remove_branding",
+                    "priority_support"):
+        t.require_feature(a, feature)
+
+
+def test_feature_error_names_the_upgrade(t):
+    a = t.signup("hint@x.com", "password123")
+    with pytest.raises(FeatureLocked) as e:
+        t.require_feature(a, "llm_answers")
+    assert "Starter" in str(e.value)                  # tells the user what to buy
+
+
+def test_unknown_feature_is_an_error_not_a_silent_pass(t):
+    a = t.signup("uf@x.com", "password123")
+    with pytest.raises(SaaSError):
+        t.require_feature(a, "does_not_exist")
+
+
+def test_upload_size_capped_per_plan(t):
+    a = t.signup("sz@x.com", "password123")
+    t.check_upload_size(a, 4 * 1024 * 1024)           # under 5 MB free cap: fine
+    with pytest.raises(LimitReached):
+        t.check_upload_size(a, 20 * 1024 * 1024)
+    t.set_plan(a.id, "business")
+    t.check_upload_size(t._load(a.id), 20 * 1024 * 1024)   # 100 MB cap: fine
+
+
+# ----------------------------------------------------------- subscription lifecycle
+def test_trial_grants_paid_features_without_payment(t):
+    a = t.signup("tr@x.com", "password123")
+    a = t.start_trial(a.id)
+    assert a.sub_status == "trialing" and a.is_paying
+    assert a.days_left() in (TRIAL_DAYS - 1, TRIAL_DAYS)
+    t.require_feature(a, "llm_answers")
+
+
+def test_trial_can_only_be_used_once(t):
+    a = t.signup("tr2@x.com", "password123")
+    t.start_trial(a.id)
+    with pytest.raises(SaaSError):
+        t.start_trial(a.id)
+
+
+def test_expired_paid_period_auto_downgrades(t):
+    """THE revenue-protecting test: when the paid month lapses, paid features stop."""
+    a = t.signup("exp@x.com", "password123")
+    t.activate_subscription(a.id, "business", period_end=time.time() + 100)
+    a = t._load(a.id)
+    assert a.entitled_plan == "business"
+    t.require_feature(a, "api_access")
+
+    t.activate_subscription(a.id, "business", period_end=time.time() - 1)   # period ran out
+    a = t._load(a.id)
+    assert a.entitled_plan == "free"                  # entitlement derived, not trusted
+    with pytest.raises(FeatureLocked):
+        t.require_feature(a, "api_access")
+
+
+def test_past_due_keeps_access_during_grace_then_drops(t):
+    a = t.signup("pd@x.com", "password123")
+    t.activate_subscription(a.id, "starter", period_end=time.time() - 1)
+    t.mark_past_due(a.id)
+    a = t._load(a.id)
+    assert a.entitled_plan == "starter"               # inside grace window: still served
+
+    t.activate_subscription(a.id, "starter", period_end=time.time() - (GRACE_DAYS + 1) * 86400)
+    t.mark_past_due(a.id)
+    assert t._load(a.id).entitled_plan == "free"      # grace exhausted
+
+
+def test_cancel_at_period_end_vs_immediately(t):
+    a = t.signup("c@x.com", "password123")
+    t.activate_subscription(a.id, "starter", period_end=time.time() + 10 * 86400)
+    t.cancel_subscription(a.id)                       # graceful: keeps what they paid for
+    assert t._load(a.id).entitled_plan == "free"      # cancelled status ends entitlement
+
+    t.activate_subscription(a.id, "starter", period_end=time.time() + 10 * 86400)
+    t.cancel_subscription(a.id, immediate=True)
+    a = t._load(a.id)
+    assert a.plan == "free" and a.period_end is None
+
+
+def test_renewal_extends_the_period(t):
+    a = t.signup("rn@x.com", "password123")
+    t.activate_subscription(a.id, "starter", period_end=time.time() + 86400)
+    first = t._load(a.id).days_left()
+    t.activate_subscription(a.id, "starter", period_end=time.time() + 30 * 86400)
+    assert t._load(a.id).days_left() > first
+
+
+def test_cannot_subscribe_to_free_or_unknown(t):
+    a = t.signup("bad@x.com", "password123")
+    for p in ("free", "enterprise"):
+        with pytest.raises(SaaSError):
+            t.activate_subscription(a.id, p, period_end=time.time() + 86400)
+
+
+def test_limits_follow_entitlement_not_stored_plan(t):
+    """A lapsed 'business' account must be held to FREE quantity limits too."""
+    a = t.signup("q2@x.com", "password123")
+    t.activate_subscription(a.id, "business", period_end=time.time() - 1)
+    a = t._load(a.id)
+    for i in range(PLANS["free"].max_documents):
+        (t.tenant_dir(a.id) / f"d{i}.md").write_text("x")
+    with pytest.raises(LimitReached):
+        t.check_can_upload(a)
+
+
+# ----------------------------------------------------------- public pricing
+def test_public_pricing_is_safe_and_complete():
+    rows = public_pricing()
+    assert [r["id"] for r in rows] == ["free", "starter", "business"]
+    assert rows[0]["price_usd"] == 0 and rows[1]["price_usd"] == 19 and rows[2]["price_usd"] == 49
+    assert rows[2]["questions"] == "unlimited"
+    blob = str(rows).lower()
+    for leak in ("password", "hash", "token", "provider_ref"):
+        assert leak not in blob

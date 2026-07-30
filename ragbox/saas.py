@@ -27,22 +27,52 @@ from pathlib import Path
 # ------------------------------------------------------------------ plans
 @dataclass(frozen=True)
 class Plan:
+    """A monthly subscription tier.
+
+    Two kinds of gating, deliberately:
+      QUANTITY  - how much you can do (documents, questions, members)
+      FEATURES  - what you can do at all (LLM answers, API, export, branding)
+
+    Quantity limits alone are weak product design: a heavy free user costs you money while a
+    light paying user feels cheated. Feature gates are what make an upgrade obviously worth it.
+    """
     name: str
-    price_usd: int
+    label: str
+    price_usd: int                    # per MONTH - recurring, not one-off
     max_documents: int
     max_questions_per_month: int
     max_members: int
-    api_access: bool
+    # ---- feature gates ----
+    llm_answers: bool                 # AI-written answers vs raw cited passages
+    api_access: bool                  # programmatic access for their own apps
+    export_data: bool                 # download their index / answer history
+    remove_branding: bool             # white-label the chat widget
+    priority_support: bool
+    max_upload_mb: int                # per-file size ceiling
 
 
 PLANS = {
-    "free":     Plan("free", 0, max_documents=10, max_questions_per_month=50,
-                     max_members=1, api_access=False),
-    "starter":  Plan("starter", 19, max_documents=200, max_questions_per_month=1000,
-                     max_members=3, api_access=False),
-    "business": Plan("business", 49, max_documents=2000, max_questions_per_month=10 ** 9,
-                     max_members=10, api_access=True),
+    "free": Plan(
+        "free", "Free", 0,
+        max_documents=10, max_questions_per_month=50, max_members=1,
+        llm_answers=False,            # citations only - proves value, withholds the polish
+        api_access=False, export_data=False, remove_branding=False,
+        priority_support=False, max_upload_mb=5),
+    "starter": Plan(
+        "starter", "Starter", 19,
+        max_documents=200, max_questions_per_month=1000, max_members=3,
+        llm_answers=True,             # the main reason to upgrade
+        api_access=False, export_data=True, remove_branding=False,
+        priority_support=False, max_upload_mb=25),
+    "business": Plan(
+        "business", "Business", 49,
+        max_documents=2000, max_questions_per_month=10 ** 9, max_members=10,
+        llm_answers=True, api_access=True, export_data=True, remove_branding=True,
+        priority_support=True, max_upload_mb=100),
 }
+
+TRIAL_DAYS = 14                       # paid features, no card - converts far better than a demo
+GRACE_DAYS = 3                        # keep access briefly after a failed renewal, then downgrade
 
 SESSION_TTL_SECONDS = 30 * 24 * 3600           # 30 days
 PBKDF2_ROUNDS = 260_000                        # deliberately slow: brute-force resistance
@@ -54,7 +84,11 @@ class SaaSError(Exception):
 
 
 class LimitReached(SaaSError):
-    """A plan limit was hit. Distinct type so the API can answer 402 instead of 400."""
+    """A quantity limit was hit. Distinct type so the API can answer 402 instead of 400."""
+
+
+class FeatureLocked(SaaSError):
+    """The plan does not include this feature at all. Also a 402 (payment required)."""
 
 
 # ------------------------------------------------------------------ password hashing
@@ -84,7 +118,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     email         TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     plan          TEXT NOT NULL DEFAULT 'free',
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    -- subscription lifecycle: this is what makes revenue RECURRING
+    sub_status    TEXT NOT NULL DEFAULT 'none',   -- none|trialing|active|past_due|cancelled
+    period_end    REAL,                           -- unix ts when the paid month expires
+    provider_ref  TEXT                            -- MoR subscription id (Dodo/Lemon Squeezy)
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
@@ -106,10 +144,43 @@ class Account:
     id: int
     email: str
     plan: str
+    sub_status: str = "none"
+    period_end: float | None = None
+
+    @property
+    def entitled_plan(self) -> str:
+        """The plan the account is ACTUALLY entitled to right now.
+
+        A paid plan whose billing period has lapsed (beyond the grace window) silently falls
+        back to free. Entitlement is derived from subscription state on every request rather
+        than trusted from the stored plan column - so a lapsed customer cannot keep paid
+        features just because nobody ran a cron job.
+        """
+        if self.plan == "free":
+            return "free"
+        if self.sub_status in ("active", "trialing"):
+            if self.period_end is None or time.time() <= self.period_end:
+                return self.plan
+            return "free"                                  # period ended
+        if self.sub_status == "past_due":
+            # inside the grace window the customer keeps access; after it, downgrade
+            if self.period_end is not None and time.time() <= self.period_end + GRACE_DAYS * 86400:
+                return self.plan
+            return "free"
+        return "free"                                      # cancelled / none
 
     @property
     def limits(self) -> Plan:
-        return PLANS.get(self.plan, PLANS["free"])
+        return PLANS.get(self.entitled_plan, PLANS["free"])
+
+    @property
+    def is_paying(self) -> bool:
+        return self.entitled_plan != "free"
+
+    def days_left(self) -> int | None:
+        if self.period_end is None or not self.is_paying:
+            return None
+        return max(0, int((self.period_end - time.time()) // 86400))
 
 
 class Tenancy:
@@ -165,25 +236,84 @@ class Tenancy:
     def account_for_token(self, token: str) -> Account:
         with self._conn() as c:
             row = c.execute(
-                "SELECT a.id, a.email, a.plan, s.expires_at FROM sessions s "
-                "JOIN accounts a ON a.id = s.account_id WHERE s.token = ?", (token,)).fetchone()
+                "SELECT a.id, a.email, a.plan, a.sub_status, a.period_end, s.expires_at "
+                "FROM sessions s JOIN accounts a ON a.id = s.account_id "
+                "WHERE s.token = ?", (token,)).fetchone()
             if row is None:
                 raise SaaSError("not signed in")
             if row["expires_at"] < time.time():
                 c.execute("DELETE FROM sessions WHERE token = ?", (token,))
                 raise SaaSError("session expired")
-        return Account(row["id"], row["email"], row["plan"])
+        return Account(row["id"], row["email"], row["plan"], row["sub_status"], row["period_end"])
 
     def logout(self, token: str) -> None:
         with self._conn() as c:
             c.execute("DELETE FROM sessions WHERE token = ?", (token,))
 
+    def _load(self, account_id: int) -> Account:
+        with self._conn() as c:
+            r = c.execute("SELECT id, email, plan, sub_status, period_end FROM accounts "
+                          "WHERE id = ?", (account_id,)).fetchone()
+        if r is None:
+            raise SaaSError("no such account")
+        return Account(r["id"], r["email"], r["plan"], r["sub_status"], r["period_end"])
+
+    # -------------------------------------------------- subscription lifecycle
+    def start_trial(self, account_id: int, plan: str = "starter") -> Account:
+        """Give paid features for TRIAL_DAYS with no card. Only once per account."""
+        if plan not in PLANS or plan == "free":
+            raise SaaSError(f"cannot trial plan '{plan}'")
+        acct = self._load(account_id)
+        if acct.sub_status != "none":
+            raise SaaSError("this account has already used its trial")
+        end = time.time() + TRIAL_DAYS * 86400
+        with self._conn() as c:
+            c.execute("UPDATE accounts SET plan=?, sub_status='trialing', period_end=? "
+                      "WHERE id=?", (plan, end, account_id))
+        return self._load(account_id)
+
+    def activate_subscription(self, account_id: int, plan: str, period_end: float,
+                              provider_ref: str | None = None) -> Account:
+        """Called by the billing webhook on a successful payment or renewal.
+
+        `period_end` is when the paid month runs out - the provider sends a fresh one on each
+        renewal, so a lapsed webhook naturally causes a downgrade rather than free service.
+        """
+        if plan not in PLANS or plan == "free":
+            raise SaaSError(f"cannot subscribe to plan '{plan}'")
+        with self._conn() as c:
+            c.execute("UPDATE accounts SET plan=?, sub_status='active', period_end=?, "
+                      "provider_ref=COALESCE(?, provider_ref) WHERE id=?",
+                      (plan, float(period_end), provider_ref, account_id))
+        return self._load(account_id)
+
+    def mark_past_due(self, account_id: int) -> Account:
+        """Payment failed. Access continues through the grace window, then auto-downgrades."""
+        with self._conn() as c:
+            c.execute("UPDATE accounts SET sub_status='past_due' WHERE id=?", (account_id,))
+        return self._load(account_id)
+
+    def cancel_subscription(self, account_id: int, immediate: bool = False) -> Account:
+        """Cancel. By default the customer keeps what they paid for until period_end."""
+        with self._conn() as c:
+            if immediate:
+                c.execute("UPDATE accounts SET plan='free', sub_status='cancelled', "
+                          "period_end=NULL WHERE id=?", (account_id,))
+            else:
+                c.execute("UPDATE accounts SET sub_status='cancelled' WHERE id=?", (account_id,))
+        return self._load(account_id)
+
     def set_plan(self, account_id: int, plan: str) -> None:
-        """Called by the billing webhook after a successful payment."""
+        """Direct plan change (admin/manual). Paid plans get a one-month period."""
         if plan not in PLANS:
             raise SaaSError(f"unknown plan '{plan}'")
         with self._conn() as c:
-            c.execute("UPDATE accounts SET plan = ? WHERE id = ?", (plan, account_id))
+            if plan == "free":
+                c.execute("UPDATE accounts SET plan='free', sub_status='none', period_end=NULL "
+                          "WHERE id=?", (account_id,))
+            else:
+                c.execute("UPDATE accounts SET plan=?, sub_status='active', period_end=? "
+                          "WHERE id=?", (plan, time.time() + 30 * 86400, account_id))
 
     # -------------------------------------------------- isolated storage
     def tenant_dir(self, account_id: int) -> Path:
@@ -243,13 +373,54 @@ class Tenancy:
                 "ON CONFLICT(account_id, month) DO UPDATE SET questions = questions + 1",
                 (account_id, self._month()))
 
+    def require_feature(self, account: Account, feature: str) -> None:
+        """Gate a FEATURE (not a quantity). Raises FeatureLocked with an upgrade hint.
+
+            tenancy.require_feature(acct, "llm_answers")
+        """
+        lim = account.limits
+        if not hasattr(lim, feature):
+            raise SaaSError(f"unknown feature '{feature}'")
+        if not getattr(lim, feature):
+            nicer = next((p.label for p in PLANS.values()
+                          if getattr(p, feature) and p.price_usd > lim.price_usd), "a paid plan")
+            raise FeatureLocked(
+                f"'{feature.replace('_', ' ')}' is not included in the {lim.label} plan. "
+                f"Available on {nicer}.")
+
+    def check_upload_size(self, account: Account, size_bytes: int) -> None:
+        cap = account.limits.max_upload_mb
+        if size_bytes > cap * 1024 * 1024:
+            raise LimitReached(f"Files are limited to {cap} MB on the {account.limits.label} plan.")
+
     def usage_summary(self, account: Account) -> dict:
         lim = account.limits
         return {
             "email": account.email,
-            "plan": account.plan,
+            "plan": account.entitled_plan,
+            "plan_label": lim.label,
+            "price_usd_per_month": lim.price_usd,
+            "subscription": {"status": account.sub_status, "days_left": account.days_left(),
+                             "is_paying": account.is_paying},
             "documents": {"used": self.document_count(account.id), "limit": lim.max_documents},
             "questions": {"used": self.questions_used(account.id),
                           "limit": lim.max_questions_per_month},
-            "api_access": lim.api_access,
+            "features": {"llm_answers": lim.llm_answers, "api_access": lim.api_access,
+                         "export_data": lim.export_data, "remove_branding": lim.remove_branding,
+                         "priority_support": lim.priority_support,
+                         "max_upload_mb": lim.max_upload_mb},
         }
+
+
+def public_pricing() -> list[dict]:
+    """Plan table for the landing page - no secrets, safe to serve unauthenticated."""
+    return [{
+        "id": p.name, "label": p.label, "price_usd": p.price_usd,
+        "documents": p.max_documents,
+        "questions": ("unlimited" if p.max_questions_per_month >= 10 ** 9
+                      else p.max_questions_per_month),
+        "members": p.max_members, "upload_mb": p.max_upload_mb,
+        "llm_answers": p.llm_answers, "api_access": p.api_access,
+        "export_data": p.export_data, "remove_branding": p.remove_branding,
+        "priority_support": p.priority_support,
+    } for p in PLANS.values()]
