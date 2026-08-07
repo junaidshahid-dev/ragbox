@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .env
+
+# runtime state from running the SaaS demo — generated, and may contain tenant data
+live_data/
+*.db
